@@ -11,7 +11,7 @@
 <meta name="apple-mobile-web-app-title" content="アイスつみ">
 <!-- SNSシェア用OGP（URLは公開先に合わせる） -->
 <meta property="og:title" content="GzGzのアイスつみ">
-<meta property="og:description" content="降ってくるアイスをキャッチして高く積もう！テニスボール・太陽・タカに気をつけて🍦">
+<meta property="og:description" content="降ってくるアイスをキャッチして高く積もう！テニスボール・太陽・タカに気をつけて🍨">
 <meta property="og:image" content="https://wanobo-my.github.io/gzgz-stacker/icon-512.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary">
@@ -175,7 +175,7 @@
       <div class="logo">GzGzの<br>アイスつみ<small>ICE CREAM STACKER</small></div>
       <div class="howto">
         ← → キー / ドラッグ で移動<br>
-        🍦 降ってくるアイスをキャッチして高く積もう<br>
+        🍨 降ってくるアイスをキャッチして高く積もう<br>
         🎾 テニスボール：アイスが潰れる！<br>
         ☀️ 太陽：ぜんぶ溶ける！！<br>
         🦅 タカ：てっぺんを持っていかれる！<br>
@@ -234,6 +234,13 @@ const FLAVORS = [
 /* レアな金のアイス: キャッチするとライフ回復 */
 const GOLDEN = { id: 'golden', name: 'きんのアイス', base: '#ffd76b', accent: '#f2a71b', deco: 'star' };
 const GOLDEN_RATE = 0.06;
+/* レアな銀のアイス: キャッチするとスロータイム */
+const SILVER = { id: 'silver', name: 'ぎんのアイス', base: '#e8eef6', accent: '#9fb6cc', deco: 'star' };
+const SILVER_RATE = 0.05;
+/* フィーバー/スロータイムの長さ（フレーム） */
+const FEVER_FRAMES = 7 * 60;
+const SLOW_FRAMES = 8 * 60;
+const SLOW_SCALE = 0.55;
 
 /* ================= キャンバス ================= */
 const cv = document.getElementById('cv');
@@ -310,6 +317,9 @@ const SFX = {
   over()   { [392, 330, 262, 196].forEach((f, i) => tone(f, .22, { type: 'triangle', delay: i * .16, vol: .14 })); },
   record() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone(f, .18, { type: 'square', delay: i * .09, vol: .09 })); },
   bounce() { tone(380, .06, { type: 'sine', slide: 120, vol: .07 }); },
+  fever()  { [523, 659, 784, 880, 1047, 1319].forEach((f, i) => tone(f, .12, { type: 'square', delay: i * .06, vol: .1 })); },
+  silver() { [880, 1174, 1568].forEach((f, i) => tone(f, .12, { type: 'triangle', delay: i * .06, vol: .12 })); },
+  slowTime() { tone(900, .5, { type: 'sine', slide: -500, vol: .12 }); tone(1400, .6, { type: 'sine', slide: -800, vol: .07, delay: .1 }); },
 };
 /* ================= BGM (AAC埋め込み) ================= */
 const BGM = (() => {
@@ -326,6 +336,7 @@ const BGM = (() => {
   el.preload = 'auto';
   el.volume = VOL.bgm;
   let name = null;
+  let rate = 1; // フィーバー中は再生速度を上げる
   return {
     play(n) {
       if (name === n && !el.paused) return;
@@ -333,6 +344,7 @@ const BGM = (() => {
       el.loop = tracks[n].loop;
       el.muted = muted;
       el.src = tracks[n].src;
+      el.playbackRate = rate;
       el.play().catch(() => { /* 自動再生ブロック時は次の操作で */ });
     },
     stop() {
@@ -341,6 +353,7 @@ const BGM = (() => {
     },
     setMuted(m) { el.muted = m; },
     setVolume(v) { el.volume = v; },
+    setRate(r) { rate = r; el.playbackRate = r; },
     current: () => (name !== null && !el.paused) ? el : null,
   };
 })();
@@ -427,6 +440,9 @@ const game = {
   faceTimer: 0,         // 困り顔タイマー
   walkPhase: 0,         // 足踏みアニメの位相
   walkAmp: 0,           // 足踏みの強さ（0〜1、移動中に上がる）
+  fever: 0,             // フィーバータイム残りフレーム（>0で崩れない）
+  slow: 0,              // スロータイム残りフレーム
+  slowQueued: false,    // フィーバー中にぎんを取った → 終了後にスロー開始
 };
 let scoops = [];        // {body, flavor, state:'falling'|'stacked', stackedAt, seed}
 let balls = [];         // {body, spent, born}
@@ -543,7 +559,7 @@ function spawnScoop(x, y, opts = {}) {
     collisionFilter: { category: CAT.SCOOP, mask: CAT.CONE | CAT.SCOOP | CAT.BALL },
   });
   Body.setVelocity(body, { x: 0, y: opts.vy ?? 1.5 });
-  const flavor = opts.flavor ?? (Math.random() < GOLDEN_RATE ? GOLDEN : pick(FLAVORS));
+  const flavor = opts.flavor ?? pickFlavor();
   const s = { body, flavor, state: opts.state ?? 'falling', stackedAt: 0, seed: Math.random() * 7, landT: 0 };
   if (s.state === 'stacked') s.stackedAt = performance.now() - 9999;
   Composite.add(engine.world, body);
@@ -591,12 +607,46 @@ function scheduleHazard(type) {
   }
 }
 
+/* フレーバー抽選: きん→ぎん→通常。おなじあじ2連中はニアミス設計で同じ味が来やすい */
+function pickFlavor() {
+  const roll = Math.random();
+  if (roll < GOLDEN_RATE) return GOLDEN;
+  if (roll < GOLDEN_RATE + SILVER_RATE) return SILVER;
+  const top = topScoop();
+  if (top && (top.chain || 0) >= 2 && top.chainId && Math.random() < 0.4) {
+    const f = FLAVORS.find(fl => fl.id === top.chainId);
+    if (f) return f; // 「あと1こ!」を狙えるチャンスを増やす
+  }
+  return pick(FLAVORS);
+}
+
+/* ================= フィーバー / スロータイム ================= */
+function startFever() {
+  game.fever = FEVER_FRAMES; // 再トリプルで延長
+  SFX.fever();
+  BGM.setRate(1.15);
+  game.shake = Math.max(game.shake, 5);
+  popups.push({ x: W / 2, y: stackTopY() - 70, text: '🍨フィーバー!!🍨', life: 90, color: '#e4a018' });
+}
+function startSlow() {
+  game.slow = SLOW_FRAMES;
+  engine.timing.timeScale = SLOW_SCALE;
+  SFX.slowTime();
+  popups.push({ x: W / 2, y: stackTopY() - 70, text: '❄スロータイム❄', life: 90, color: '#5b8fc9' });
+}
+
 /* ================= 難易度・スポーン管理 ================= */
 function difficulty() {
   return game.maxCount / 5 + game.t / (60 * 45); // 段数と時間で漸増
 }
 function doSpawnCycle() {
   const d = difficulty();
+  // フィーバー中: ハザードなしのアイスラッシュ（間隔半分）
+  if (game.fever > 0) {
+    spawnScoop();
+    game.spawnTimer = Math.max(26, (115 - d * 9) / 2);
+    return;
+  }
   const n = stackCount();
   const w = [];
   w.push(['scoop', 100]);
@@ -638,16 +688,41 @@ function land(s, support) {
     burst(p.x, p.y, '#ffe9a0', 14);
     if (game.lives < 3) {
       game.lives++;
-      popups.push({ x: p.x, y: p.y - 56, text: '🍦ライフかいふく!', life: 60, color: '#e4a018' });
+      popups.push({ x: p.x, y: p.y - 56, text: '🍨ライフかいふく!', life: 60, color: '#e4a018' });
     } else {
       popups.push({ x: p.x, y: p.y - 56, text: '✨きんのアイス!✨', life: 60, color: '#e4a018' });
     }
   }
-  // おなじ味ボーナス演出
+  // 銀のアイス: スロータイム（フィーバー中なら終了後に開始）
+  if (s.flavor.id === 'silver') {
+    SFX.silver();
+    burst(p.x, p.y, '#dcebff', 14);
+    if (game.fever > 0) {
+      game.slowQueued = true;
+      popups.push({ x: p.x, y: p.y - 56, text: '❄スロータイムよやく!', life: 60, color: '#5b8fc9' });
+    } else {
+      startSlow();
+    }
+  }
+  // おなじあじ連鎖（きん/ぎんは中立: 連鎖を壊さず引き継ぐ）
   const sup = scoops.find(o => o.body === support);
-  if (sup && sup.flavor.id === s.flavor.id && s.flavor.id !== 'golden') {
-    burst(p.x, p.y - SCOOP_R - 8, '#fff', 8);
-    popups.push({ x: p.x, y: p.y - 52, text: 'おなじあじ♪', life: 45, color: '#7b4fa0' });
+  if (s.flavor.id === 'golden' || s.flavor.id === 'silver') {
+    s.chain = sup ? (sup.chain || 0) : 0;
+    s.chainId = sup ? sup.chainId : null;
+  } else if (sup && sup.chainId === s.flavor.id) {
+    s.chain = (sup.chain || 1) + 1;
+    s.chainId = s.flavor.id;
+    if (s.chain === 2) {
+      burst(p.x, p.y - SCOOP_R - 8, '#fff', 8);
+      popups.push({ x: p.x, y: p.y - 52, text: 'おなじあじ♪ あと1こ!', life: 55, color: '#7b4fa0' });
+    } else if (s.chain >= 3) {
+      s.chain = 0; s.chainId = null; // 次のフィーバーはまた3つ必要
+      burst(p.x, p.y - SCOOP_R - 8, '#ffd76b', 16);
+      startFever();
+    }
+  } else {
+    s.chain = 1;
+    s.chainId = s.flavor.id;
   }
   if (n > game.maxCount) {
     game.maxCount = n;
@@ -705,6 +780,12 @@ function gameOver(reason) {
   if (game.state !== 'play') return;
   game.state = 'over';
   game.overReason = reason;
+  // フィーバー/スローの効果を解除
+  game.fever = 0;
+  game.slow = 0;
+  game.slowQueued = false;
+  engine.timing.timeScale = 1;
+  BGM.setRate(1);
   updateHomeBtn();
   SFX.over();
   const isRecord = game.maxCount > 0 && game.maxCount > game.best;
@@ -719,7 +800,7 @@ function gameOver(reason) {
       game.overReason + '<b>' + game.maxCount + 'だん</b><span id="bestLine">ベスト ' + game.best + 'だん</span>';
     document.getElementById('newRecord').classList.toggle('hidden', !isRecord);
     document.getElementById('overImg').src = isRecord ? GIF_SRC : SUWARU_SRC;
-    const text = 'GzGzのアイスつみで ' + game.maxCount + 'だん 積めました！🍦🐻 #GzGz #アイスつみ';
+    const text = 'GzGzのアイスつみで ' + game.maxCount + 'だん 積めました！🍨🐻 #GzGz #アイスつみ';
     game.shareText = text;
     document.getElementById('shareX').href =
       'https://twitter.com/intent/tweet?text=' + encodeURIComponent(text) + '&url=' + encodeURIComponent(GAME_URL);
@@ -770,8 +851,38 @@ function update() {
     game.walkAmp += ((moving ? 1 : 0) - game.walkAmp) * 0.18;
     if (moving) game.walkPhase += 0.22 + Math.abs(dx) * 0.02;
 
-    // スポーン
-    if (--game.spawnTimer <= 0) doSpawnCycle();
+    // スポーン（スロータイム中はゲーム内時間に合わせて間隔も伸ばす）
+    game.spawnTimer -= (game.slow > 0 ? engine.timing.timeScale : 1);
+    if (game.spawnTimer <= 0) doSpawnCycle();
+
+    // フィーバータイム進行
+    if (game.fever > 0) {
+      game.fever--;
+      if (game.t % 3 === 0) { // 金色のキラキラが舞う
+        particles.push({
+          x: rnd(10, W - 10), y: game.camY + rnd(-20, H * 0.6),
+          vx: rnd(-.2, .2), vy: rnd(.8, 1.8),
+          life: 45, maxLife: 45, color: pick(['#ffd76b', '#fff3c2', '#ffe9a0']), r: rnd(1.5, 3.2), grav: false,
+        });
+      }
+      if (game.fever === 0) {
+        BGM.setRate(1);
+        if (game.slowQueued) { game.slowQueued = false; startSlow(); } // 予約していたスローを開始
+      }
+    }
+    // スロータイム進行（最後の1秒でゆっくり等速へ戻す）
+    if (game.slow > 0) {
+      game.slow--;
+      engine.timing.timeScale = game.slow > 60 ? SLOW_SCALE : SLOW_SCALE + (1 - game.slow / 60) * (1 - SLOW_SCALE);
+      if (game.t % 5 === 0) { // 青白い結晶が舞う
+        particles.push({
+          x: rnd(10, W - 10), y: game.camY + rnd(-20, H * 0.6),
+          vx: rnd(-.3, .3), vy: rnd(.3, .9),
+          life: 55, maxLife: 55, color: pick(['#dcebff', '#ffffff', '#b8d4f0']), r: rnd(1.5, 3), grav: false,
+        });
+      }
+      if (game.slow === 0) engine.timing.timeScale = 1;
+    }
 
     // 予告 → 実体化
     for (const p of pending) {
@@ -794,7 +905,8 @@ function update() {
       let landed = false;
       const coneTop = CONE_Y - CONE_H / 2;
       if (Math.abs(sx - game.px) < (CONE_W + SCOOP_W) / 2 - 10 && sBottom > coneTop - 8 && sBottom < coneTop + 12 && stackCount() === 0) {
-        Body.setPosition(s.body, { x: sx, y: coneTop - SCOOP_H / 2 + 1 });
+        // フィーバー中は自動で真ん中に整列（明けた瞬間に崩れる理不尽を防ぐ）
+        Body.setPosition(s.body, { x: game.fever > 0 ? game.px : sx, y: coneTop - SCOOP_H / 2 + 1 });
         Body.setVelocity(s.body, { x: 0, y: 0 });
         Body.setAngularVelocity(s.body, 0);
         land(s, cone);
@@ -805,7 +917,7 @@ function update() {
           const tp = t.body.position;
           const tTop = tp.y - SCOOP_H / 2;
           if (Math.abs(sx - tp.x) < SCOOP_W - 8 && sBottom > tTop - 8 && sBottom < tTop + 14) {
-            Body.setPosition(s.body, { x: sx, y: tTop - SCOOP_H / 2 + 1 });
+            Body.setPosition(s.body, { x: game.fever > 0 ? tp.x : sx, y: tTop - SCOOP_H / 2 + 1 });
             Body.setVelocity(s.body, { x: 0, y: 0 });
             Body.setAngularVelocity(s.body, 0);
             land(s, t.body);
@@ -816,20 +928,20 @@ function update() {
     }
   }
 
-  // 物理
-  updateGlues();
+  // 物理（フィーバー中は接着が切れない＝崩れない）
+  if (game.fever <= 0) updateGlues();
   Engine.update(engine, 1000 / 60);
 
   // アイスの状態チェック
   for (const s of scoops) {
     if (s.state === 'gone') continue;
     if (s.landT > 0) s.landT--;
-    // 金のアイスはキラキラの尾を引く
-    if (s.state === 'falling' && s.flavor.id === 'golden' && game.t % 5 === 0) {
+    // きん/ぎんのアイスはキラキラの尾を引く
+    if (s.state === 'falling' && (s.flavor.id === 'golden' || s.flavor.id === 'silver') && game.t % 5 === 0) {
       particles.push({
         x: s.body.position.x + rnd(-12, 12), y: s.body.position.y + rnd(-10, 10),
         vx: rnd(-.3, .3), vy: rnd(-.2, .4),
-        life: 25, maxLife: 25, color: '#ffe9a0', r: rnd(1.5, 3), grav: false,
+        life: 25, maxLife: 25, color: s.flavor.id === 'golden' ? '#ffe9a0' : '#dcebff', r: rnd(1.5, 3), grav: false,
       });
     }
     const y = s.body.position.y;
@@ -977,11 +1089,22 @@ function draw() {
   const s = viewScale * dpr;
   ctx.setTransform(s, 0, 0, s, 0, 0);
 
-  // 空（カメラ高度で少し色が変わる）
+  // 空（カメラ高度で少し色が変わる。フィーバー=金色 / スロー=青白）
   const alt = Math.min(1, -game.camY / 2200);
+  let skyTop = lerpColor('#bee3f5', '#8db9ee', alt);
+  let skyBottom = '#fdf3e3';
+  if (game.fever > 0) {
+    const k = Math.min(1, game.fever / 60); // 終わり際はフェードアウト
+    skyTop = lerpColor(skyTop, '#ffce6b', 0.45 * k);
+    skyBottom = lerpColor(skyBottom, '#ffe9a0', 0.55 * k);
+  } else if (game.slow > 0) {
+    const k = Math.min(1, game.slow / 60);
+    skyTop = lerpColor(skyTop, '#7fa8d9', 0.45 * k);
+    skyBottom = lerpColor(skyBottom, '#dce9f7', 0.55 * k);
+  }
   const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, lerpColor('#bee3f5', '#8db9ee', alt));
-  grad.addColorStop(1, '#fdf3e3');
+  grad.addColorStop(0, skyTop);
+  grad.addColorStop(1, skyBottom);
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, W, H);
 
@@ -1029,7 +1152,10 @@ function draw() {
 }
 
 function lerpColor(c1, c2, t) {
-  const p = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  // '#rrggbb' と 'rgb(r,g,b)' の両方を受け付ける（lerpColorの結果を再lerpできるように）
+  const p = c => c.startsWith('#')
+    ? [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)]
+    : c.match(/\d+/g).map(Number);
   const a = p(c1), b = p(c2);
   const m = a.map((v, i) => Math.round(v + (b[i] - v) * t));
   return `rgb(${m[0]},${m[1]},${m[2]})`;
@@ -1156,14 +1282,46 @@ function rounded(x, y, w, h, r) {
   ctx.closePath();
 }
 
+/* 4点スター（キラッ） */
+function drawSparkle(x, y, size, color, alpha) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(0, -size);
+  ctx.quadraticCurveTo(size * 0.22, -size * 0.22, size, 0);
+  ctx.quadraticCurveTo(size * 0.22, size * 0.22, 0, size);
+  ctx.quadraticCurveTo(-size * 0.22, size * 0.22, -size, 0);
+  ctx.quadraticCurveTo(-size * 0.22, -size * 0.22, 0, -size);
+  ctx.fill();
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
 function drawScoop(s) {
   const { x, y } = s.body.position;
   const rot = s.body.angle;
   const f = s.flavor;
   const r = SCOOP_R;
+  const isRare = f.id === 'golden' || f.id === 'silver';
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(rot);
+  // レアの輝き①: パルスする光輪（本体の背面）
+  if (isRare) {
+    const tt = game.t * 0.09 + s.seed;
+    const glowR = r * (1.75 + Math.sin(tt) * 0.2);
+    const gcol = f.id === 'golden' ? '255,210,90' : '175,210,255';
+    const rg = ctx.createRadialGradient(0, -2, r * 0.4, 0, -2, glowR);
+    rg.addColorStop(0, `rgba(${gcol},0.55)`);
+    rg.addColorStop(1, `rgba(${gcol},0)`);
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(0, -2, glowR, 0, Math.PI * 2); ctx.fill();
+    // 輝き②: スケールパルス
+    const pu = 1 + 0.05 * Math.sin(game.t * 0.12 + s.seed);
+    ctx.scale(pu, pu);
+  }
   if (s.landT > 0) { // ぷにっと着地
     const k = s.landT / 18;
     ctx.scale(1 + 0.16 * k, 1 - 0.2 * k);
@@ -1221,7 +1379,7 @@ function drawScoop(s) {
       const a = sd + i * 2.2;
       ctx.beginPath(); ctx.arc(Math.cos(a) * r * .45, Math.sin(a) * r * .4 - 2, 3, 0, Math.PI * 2); ctx.fill();
     }
-  } else if (f.deco === 'star') { // 金のアイス
+  } else if (f.deco === 'star') { // きん/ぎんのアイス
     ctx.save();
     ctx.translate(0, -4);
     ctx.rotate(sd + game.t * 0.02);
@@ -1232,9 +1390,31 @@ function drawScoop(s) {
       ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
     }
     ctx.closePath();
-    ctx.fillStyle = '#fff3c2';
+    ctx.fillStyle = f.id === 'silver' ? '#ffffff' : '#fff3c2';
     ctx.fill();
     ctx.restore();
+  }
+  // レアの輝き③: 本体を横切る光の帯（スペキュラスイープ）
+  if (isRare) {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(0, -2, r - 1, 0, Math.PI * 2); ctx.clip();
+    ctx.rotate(-0.5);
+    const sweep = ((game.t * 0.014 + s.seed * 0.31) % 1) * (r * 4.6) - r * 2.3;
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillRect(sweep, -r * 1.8, 6, r * 3.6);
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.fillRect(sweep + 10, -r * 1.8, 3, r * 3.6);
+    ctx.restore();
+  }
+  // レアの輝き④: 周回するキラッ（4点スター）
+  if (isRare) {
+    const scol = f.id === 'golden' ? '#fff3c2' : '#eaf6ff';
+    for (let i = 0; i < 3; i++) {
+      const a = game.t * 0.045 + s.seed + i * (Math.PI * 2 / 3);
+      const tw = (Math.sin(game.t * 0.15 + i * 2.1 + s.seed) + 1) / 2; // 明滅
+      if (tw < 0.25) continue;
+      drawSparkle(Math.cos(a) * (r + 9), Math.sin(a) * (r * 0.8 + 7) - 2, 2 + tw * 3.2, scol, tw);
+    }
   }
   ctx.restore();
 }
@@ -1340,6 +1520,23 @@ function drawHUD() {
   // スコア
   outlineText(stackCount() + 'だん', W / 2, 30, 30, NAVY);
   outlineText('ベスト ' + Math.max(game.best, game.maxCount) + 'だん', W - 60, 64, 14, NAVY);
+  // フィーバー/スロータイムの残り時間バー
+  let fx = null;
+  if (game.fever > 0) fx = { k: game.fever / FEVER_FRAMES, label: '🍨フィーバー!!', c1: '#ffb62e', c2: '#ffd76b', tc: '#e4a018' };
+  else if (game.slow > 0) fx = { k: game.slow / SLOW_FRAMES, label: '❄スロータイム', c1: '#5b8fc9', c2: '#a8cdf0', tc: '#4a7ab5' };
+  if (fx) {
+    const bw = 190, bx = (W - bw) / 2, by = 52;
+    ctx.fillStyle = 'rgba(255,255,255,.85)';
+    rounded(bx - 3, by - 3, bw + 6, 14, 7); ctx.fill();
+    ctx.strokeStyle = NAVY; ctx.lineWidth = 2.5;
+    rounded(bx - 3, by - 3, bw + 6, 14, 7); ctx.stroke();
+    const g2 = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+    g2.addColorStop(0, fx.c1); g2.addColorStop(1, fx.c2);
+    ctx.fillStyle = g2;
+    if (bw * fx.k > 8) { rounded(bx, by, bw * fx.k, 8, 4); ctx.fill(); }
+    const pulse = 15 + Math.sin(game.t * 0.25) * 1.5;
+    outlineText(fx.label, W / 2, by + 26, pulse, fx.tc);
+  }
 }
 
 /* ================= メインループ ================= */
@@ -1368,6 +1565,11 @@ function resetGame() {
   game.shake = 0;
   game.faceTimer = 0;
   game.overReason = '';
+  game.fever = 0;
+  game.slow = 0;
+  game.slowQueued = false;
+  engine.timing.timeScale = 1;
+  BGM.setRate(1);
   Body.setPosition(cone, { x: game.px, y: CONE_Y });
 }
 function updateHomeBtn() {
@@ -1399,7 +1601,7 @@ document.getElementById('shareBtn').addEventListener('click', () => {
   document.getElementById('shareMenu').classList.toggle('hidden');
 });
 document.getElementById('shareOther').addEventListener('click', async (e) => {
-  const text = game.shareText || 'GzGzのアイスつみ🍦🐻';
+  const text = game.shareText || 'GzGzのアイスつみ🍨🐻';
   const full = text + '\n' + GAME_URL;
   const btn = e.target;
   const copied = () => {
@@ -1438,7 +1640,14 @@ window.GZ = {
     else if (type === 'sun') spawnSun(x ?? game.px);
     else if (type === 'hawk') spawnHawk();
     else if (type === 'golden') spawnScoop(x ?? game.px, undefined, { flavor: GOLDEN });
+    else if (type === 'silver') spawnScoop(x ?? game.px, undefined, { flavor: SILVER });
+    else {
+      const f = FLAVORS.find(fl => fl.id === type);
+      if (f) spawnScoop(x ?? game.px, undefined, { flavor: f }); // 味を指定してスポーン
+    }
   },
+  fever: () => startFever(),
+  slowTime: () => startSlow(),
   stack(n) {
     let support = cone;
     for (let i = 0; i < n; i++) {

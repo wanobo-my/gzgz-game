@@ -238,7 +238,7 @@ const GOLDEN_RATE = 0.06;
 const SILVER = { id: 'silver', name: 'ぎんのアイス', base: '#e8eef6', accent: '#9fb6cc', deco: 'star' };
 const SILVER_RATE = 0.05;
 /* フィーバー/スロータイムの長さ（フレーム） */
-const FEVER_FRAMES = 7 * 60;
+const FEVER_FRAMES = 4 * 60;
 const SLOW_FRAMES = 8 * 60;
 const SLOW_SCALE = 0.55;
 
@@ -493,6 +493,14 @@ function removeGluesFor(body) {
   }
   glues = glues.filter(g => !g.gone);
 }
+/* フィーバー終了時: 位置は動かさず、現在の相対位置で接着を張り直して伸びをゼロに戻す
+   （フィーバー中に伸びた接着が明けた瞬間に一斉破断して即崩壊するのを防ぐ） */
+function refreshGlues() {
+  const pairs = glues.map(g => ({ a: g.a, b: g.b }));
+  for (const g of glues) dropGlue(g);
+  glues = [];
+  for (const { a, b } of pairs) addGlue(a, b);
+}
 function updateGlues() {
   for (const g of glues) {
     for (const cst of [g.c1, g.c2]) {
@@ -650,9 +658,9 @@ function doSpawnCycle() {
   const n = stackCount();
   const w = [];
   w.push(['scoop', 100]);
-  if (n >= 2) w.push(['tennis', Math.min(5 + d * 2.2, 17)]);
-  if (n >= 3) w.push(['hawk', Math.min(3.5 + d * 1.8, 13)]);
-  if (n >= 4) w.push(['sun', Math.min(1.0 + d * 0.9, 5.5)]); // でかくなったぶん頻度は控えめ
+  if (n >= 2) w.push(['tennis', Math.min(7 + d * 2.6, 20)]);
+  if (n >= 3) w.push(['hawk', Math.min(5 + d * 2.2, 16)]);
+  if (n >= 4) w.push(['sun', Math.min(1.6 + d * 1.1, 7)]); // でかくなったぶん頻度は控えめ
   const total = w.reduce((a, [, v]) => a + v, 0);
   let r = Math.random() * total;
   for (const [type, v] of w) {
@@ -851,8 +859,8 @@ function update() {
     game.walkAmp += ((moving ? 1 : 0) - game.walkAmp) * 0.18;
     if (moving) game.walkPhase += 0.22 + Math.abs(dx) * 0.02;
 
-    // スポーン（スロータイム中はゲーム内時間に合わせて間隔も伸ばす）
-    game.spawnTimer -= (game.slow > 0 ? engine.timing.timeScale : 1);
+    // スポーン（スロータイム中も実時間ペース: 落下だけ遅いので画面が賑やかになる）
+    game.spawnTimer -= 1;
     if (game.spawnTimer <= 0) doSpawnCycle();
 
     // フィーバータイム進行
@@ -867,6 +875,7 @@ function update() {
       }
       if (game.fever === 0) {
         BGM.setRate(1);
+        refreshGlues(); // 伸びた接着をリセットして明け即崩壊を防ぐ
         if (game.slowQueued) { game.slowQueued = false; startSlow(); } // 予約していたスローを開始
       }
     }
@@ -893,6 +902,22 @@ function update() {
       }
     }
     pending = pending.filter(p => p.t > 0);
+  }
+
+  // フィーバー中の磁石キャッチ: 落下アイスがスタック上部に吸い付く
+  if (game.state === 'play' && game.fever > 0) {
+    const top = topScoop();
+    const tx = top ? top.body.position.x : game.px;
+    const ty = top ? top.body.position.y : CONE_Y;
+    for (const s of scoops) {
+      if (s.state !== 'falling') continue;
+      const sp = s.body.position;
+      const dxm = tx - sp.x, dym = ty - sp.y;
+      if (dym > 0 && dym < 150 && Math.abs(dxm) < 95) {
+        Body.setPosition(s.body, { x: sp.x + dxm * 0.18, y: sp.y });
+        Body.setVelocity(s.body, { x: s.body.velocity.x * 0.6, y: s.body.velocity.y });
+      }
+    }
   }
 
   // 着地判定（近接スナップ: 真上から重なったら衝撃なしで乗る）
@@ -946,9 +971,12 @@ function update() {
     }
     const y = s.body.position.y;
     if (s.state === 'falling' && y > GROUND_Y - SCOOP_R + 6) {
-      // 取り逃し
+      // 取り逃し（フィーバー中は無罰: ご褒美タイムにライフは減らさない）
       removeScoop(s);
-      if (game.state === 'play') loseLife(s.body.position.x, GROUND_Y - 10, s.flavor);
+      if (game.state === 'play') {
+        if (game.fever > 0) burst(s.body.position.x, GROUND_Y - 10, s.flavor.base, 6, { flat: true });
+        else loseLife(s.body.position.x, GROUND_Y - 10, s.flavor);
+      }
     } else if (s.state === 'stacked' && y > CONE_Y + 90) {
       // スタックから転落
       removeScoop(s);

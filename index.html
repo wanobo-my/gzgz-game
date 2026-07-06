@@ -274,6 +274,7 @@ const SILVER = { id: 'silver', name: 'ぎんのアイス', base: '#e8eef6', acce
 const SILVER_RATE = 0.05;
 /* フィーバー/スロータイムの長さ（フレーム） */
 const FEVER_FRAMES = 6 * 60;
+const ZOOM_MIN = 0.6;          // ズームアウトの下限（これ以上はスクロールに切替）
 const SLOW_FRAMES = 8 * 60;
 const SLOW_SCALE = 0.55;
 
@@ -467,7 +468,8 @@ const game = {
   lives: 3,
   maxCount: 0,          // 最高段数（スコア）
   best: Number(localStorage.getItem('gzgz-ice-best') || 0),
-  camY: 0,              // カメラ上端 (world座標)
+  camY: 0,              // カメラのスクロール量 (world座標)
+  zoom: 1,              // 塔が高くなるとズームアウト（地面中央が支点）
   shake: 0,
   t: 0,                 // プレイ経過フレーム
   spawnTimer: 100,
@@ -562,6 +564,13 @@ function topScoop() {
   if (!st.length) return null;
   return st.reduce((a, b) => a.body.position.y < b.body.position.y ? a : b);
 }
+/* 画面上端/下端の world y（ズーム＋スクロールを考慮） */
+function viewTopY() {
+  return game.camY - (1 - game.zoom) * GROUND_Y / game.zoom;
+}
+function viewBottomY() {
+  return game.camY + (H - (1 - game.zoom) * GROUND_Y) / game.zoom;
+}
 
 /* ================= 入力 ================= */
 const keys = {};
@@ -574,7 +583,8 @@ window.addEventListener('keyup', e => { keys[e.key] = false; });
 function pointerX(e) {
   const rect = cv.getBoundingClientRect();
   const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-  return x / viewScale;
+  const sx = x / viewScale;
+  return (sx - (1 - game.zoom) * W / 2) / game.zoom; // ズームアウト中の座標補正
 }
 let dragging = false;
 cv.addEventListener('pointerdown', e => { dragging = true; game.targetX = pointerX(e); });
@@ -591,7 +601,7 @@ function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 function spawnScoop(x, y, opts = {}) {
   x = x ?? rnd(PLAYER_MIN_X, PLAYER_MAX_X);
-  y = y ?? game.camY - 30;
+  y = y ?? viewTopY() - 30;
   const body = Bodies.rectangle(x, y, SCOOP_W, SCOOP_H, {
     chamfer: { radius: 11 },
     friction: 1.0,
@@ -610,7 +620,7 @@ function spawnScoop(x, y, opts = {}) {
   return s;
 }
 function spawnBall(x) {
-  const body = Bodies.circle(x ?? rnd(60, 320), game.camY - 30, 15, {
+  const body = Bodies.circle(x ?? rnd(60, 320), viewTopY() - 30, 15, {
     friction: 0.2,
     restitution: 0.85,
     frictionAir: 0.008,
@@ -622,7 +632,7 @@ function spawnBall(x) {
   balls.push({ body, spent: false, born: game.t });
 }
 function spawnSun(x) {
-  suns.push({ x: x ?? rnd(80, 300), y: game.camY - 110, vx: rnd(-0.12, 0.12), phase: Math.random() * 9, dead: false, fade: 1 });
+  suns.push({ x: x ?? rnd(80, 300), y: viewTopY() - 110, vx: rnd(-0.12, 0.12), phase: Math.random() * 9, dead: false, fade: 1 });
 }
 function spawnHawk(targetX) {
   const top = topScoop();
@@ -910,7 +920,7 @@ function update() {
       game.fever--;
       if (game.t % 3 === 0) { // 金色のキラキラが舞う
         particles.push({
-          x: rnd(10, W - 10), y: game.camY + rnd(-20, H * 0.6),
+          x: rnd(10, W - 10), y: viewTopY() + rnd(-20, (H / game.zoom) * 0.6),
           vx: rnd(-.2, .2), vy: rnd(.8, 1.8),
           life: 45, maxLife: 45, color: pick(['#ffd76b', '#fff3c2', '#ffe9a0']), r: rnd(1.5, 3.2), grav: false,
         });
@@ -927,7 +937,7 @@ function update() {
       engine.timing.timeScale = game.slow > 60 ? SLOW_SCALE : SLOW_SCALE + (1 - game.slow / 60) * (1 - SLOW_SCALE);
       if (game.t % 5 === 0) { // 青白い結晶が舞う
         particles.push({
-          x: rnd(10, W - 10), y: game.camY + rnd(-20, H * 0.6),
+          x: rnd(10, W - 10), y: viewTopY() + rnd(-20, (H / game.zoom) * 0.6),
           vx: rnd(-.3, .3), vy: rnd(.3, .9),
           life: 55, maxLife: 55, color: pick(['#dcebff', '#ffffff', '#b8d4f0']), r: rnd(1.5, 3), grav: false,
         });
@@ -1001,6 +1011,18 @@ function update() {
   if (game.fever <= 0) updateGlues();
   Engine.update(engine, 1000 / 60);
 
+  // フィーバー中: 塔を剛体化して真っ直ぐ整列（どんなに激しく動いても揺れない）
+  if (game.fever > 0) {
+    const st = stackedList().sort((a, b) => b.body.position.y - a.body.position.y); // 下から順
+    const baseY = CONE_Y - CONE_H / 2 - SCOOP_H / 2 + 1;
+    st.forEach((s, i) => {
+      Body.setPosition(s.body, { x: game.px, y: baseY - i * (SCOOP_H - 1) });
+      Body.setAngle(s.body, 0);
+      Body.setVelocity(s.body, { x: 0, y: 0 });
+      Body.setAngularVelocity(s.body, 0);
+    });
+  }
+
   // アイスの状態チェック
   for (const s of scoops) {
     if (s.state === 'gone') continue;
@@ -1038,7 +1060,7 @@ function update() {
 
   // テニスボール
   for (const bl of balls) {
-    if (bl.body.position.y > game.camY + H + 120 || game.t - bl.born > 60 * 9) {
+    if (bl.body.position.y > viewBottomY() + 120 || game.t - bl.born > 60 * 9) {
       toRemove.push(bl.body); bl.gone = true;
     }
   }
@@ -1102,9 +1124,17 @@ function update() {
   toRemove = [];
   scoops = scoops.filter(s => s.state !== 'gone');
 
-  // カメラ
-  const targetCam = Math.min(0, stackTopY() - 300);
-  game.camY += (targetCam - game.camY) * 0.06;
+  // カメラ / ズーム: 塔が高くなったらまずズームアウト（GzGzも塔も全部見える）、
+  // 下限に達したら従来どおりスクロールに切り替え
+  const contentTop = Math.min(stackTopY(), CONE_Y) - 170; // 落下してくるアイスも見えるマージン
+  let zTarget = 1, camTarget = 0;
+  if (contentTop < 0) {
+    zTarget = Math.max(ZOOM_MIN, GROUND_Y / (GROUND_Y - contentTop));
+    const visTop = -(1 - zTarget) * GROUND_Y / zTarget; // camY=0のときの画面上端(world)
+    if (contentTop < visTop) camTarget = contentTop - visTop;
+  }
+  game.zoom += (zTarget - game.zoom) * 0.05;
+  game.camY += (camTarget - game.camY) * 0.06;
 
   // パーティクル
   for (const p of particles) {
@@ -1162,7 +1192,7 @@ function draw() {
   ctx.setTransform(s, 0, 0, s, 0, 0);
 
   // 空（カメラ高度で少し色が変わる。フィーバー=金色 / スロー=青白）
-  const alt = Math.min(1, -game.camY / 2200);
+  const alt = Math.min(1, Math.max(0, -viewTopY() / 2200));
   let skyTop = lerpColor('#bee3f5', '#8db9ee', alt);
   let skyBottom = '#fdf3e3';
   if (game.fever > 0) {
@@ -1182,7 +1212,11 @@ function draw() {
 
   ctx.save();
   const shx = (Math.random() - 0.5) * game.shake, shy = (Math.random() - 0.5) * game.shake;
-  ctx.translate(shx, -game.camY + shy);
+  const z = game.zoom;
+  // 地面中央を支点にズーム → その上でスクロール
+  ctx.translate(shx + (1 - z) * W / 2, shy + (1 - z) * GROUND_Y);
+  ctx.scale(z, z);
+  ctx.translate(0, -game.camY);
 
   drawStars();
   drawClouds();
@@ -1215,7 +1249,7 @@ function draw() {
     const blink = Math.floor(p.t / 6) % 2 === 0;
     if (!blink) continue;
     const icon = p.type === 'sun' ? '☀️' : p.type === 'hawk' ? '🦅' : '🎾';
-    outlineText(icon + '⚠️', p.x, game.camY + 46, 22, '#d8452e');
+    outlineText(icon + '⚠️', p.x, viewTopY() + 46 / game.zoom, 22 / game.zoom, '#d8452e');
   }
 
   ctx.restore();
@@ -1246,12 +1280,12 @@ function outlineText(text, x, y, size, color, align = 'center') {
 
 /* 高く積むと星空になる */
 function drawStars() {
-  const vis = Math.min(1, Math.max(0, (-game.camY - 500) / 900));
+  const vis = Math.min(1, Math.max(0, (-viewTopY() - 500) / 900));
   if (vis <= 0) return;
   for (let i = 0; i < 36; i++) {
     const sx = ((i * 137 + 40) % (W - 20)) + 10;
     const base = -300 - ((i * 331) % 2600);
-    const yy = base + game.camY * 0.5; // 遠景パララックス
+    const yy = base + viewTopY() * 0.5; // 遠景パララックス
     const tw = 0.5 + 0.5 * Math.sin(game.t * 0.06 + i * 1.7);
     ctx.globalAlpha = vis * (0.3 + 0.7 * tw);
     ctx.fillStyle = i % 3 ? '#fff' : '#ffe9a8';
@@ -1267,7 +1301,7 @@ function drawStars() {
 function drawBestLine() {
   if (game.best <= 0 || game.state === 'title') return;
   const by = (CONE_Y - CONE_H / 2) - game.best * (SCOOP_H - 1);
-  if (by < game.camY + 24 || by > game.camY + H) return;
+  if (by < viewTopY() + 24 || by > viewBottomY()) return;
   ctx.save();
   ctx.setLineDash([9, 8]);
   ctx.strokeStyle = 'rgba(228,88,107,.6)';
@@ -1282,7 +1316,7 @@ function drawClouds() {
   const cl = [[70, -160, 26], [330, -420, 32], [180, -760, 24], [350, -1100, 30], [90, -1500, 28], [300, 120, 22], [120, 320, 26]];
   for (const [x, y, r] of cl) {
     // 少しパララックス
-    const yy = y + game.camY * 0.25;
+    const yy = y + viewTopY() * 0.25;
     ctx.beginPath();
     ctx.arc(x, yy, r, 0, Math.PI * 2);
     ctx.arc(x + r * 0.9, yy + 6, r * 0.75, 0, Math.PI * 2);
@@ -1630,6 +1664,7 @@ function resetGame() {
   game.lives = 3;
   game.maxCount = 0;
   game.camY = 0;
+  game.zoom = 1;
   game.t = 0;
   game.spawnTimer = 60;
   game.px = W / 2;

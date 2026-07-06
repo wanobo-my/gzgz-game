@@ -124,6 +124,13 @@
     display: inline-block;
   }
   #shareMenu { display: flex; gap: 8px; }
+  #cardImg {
+    max-height: 66%;
+    max-width: 78%;
+    border: 3px solid var(--navy);
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(35,42,92,.35);
+  }
   .btn.share {
     font-size: 13px;
     padding: 8px 14px;
@@ -234,6 +241,16 @@
         <a id="shareLine" class="btn share" target="_blank" rel="noopener">LINE</a>
         <a id="shareThreads" class="btn share" target="_blank" rel="noopener">Threads</a>
         <button id="shareOther" class="btn share">その他</button>
+      </div>
+      <button id="cardBtn" class="btn sub">📸 スコアカードを保存</button>
+    </div>
+
+    <div id="cardOv" class="overlay hidden">
+      <img id="cardImg" alt="スコアカード">
+      <div style="display:flex; gap:10px;">
+        <button id="cardShareBtn" class="btn sub">シェアする</button>
+        <button id="cardSaveBtn" class="btn sub">ほぞん</button>
+        <button id="cardCloseBtn" class="btn sub">とじる</button>
       </div>
     </div>
   </div>
@@ -490,6 +507,16 @@ let particles = [];     // {x,y,vx,vy,life,maxLife,color,r,grav}
 let popups = [];        // {x,y,text,life,color}
 let toRemove = [];
 let glues = [];         // 弱い接着 {constraint, a, b} 一定以上伸びると切れる
+
+/* 最高記録の瞬間のスクリーンショット（スコアカード用） */
+const snapCv = document.createElement('canvas');
+snapCv.width = W; snapCv.height = H;
+let hasSnapshot = false;
+let snapshotPending = false;
+function captureSnapshot() {
+  snapCv.getContext('2d').drawImage(cv, 0, 0, W, H);
+  hasSnapshot = true;
+}
 const GLUE_BREAK_DIST = 30;
 
 function rotatedPoint(body, point) {
@@ -786,6 +813,7 @@ function land(s, support) {
   }
   if (n > game.maxCount) {
     game.maxCount = n;
+    snapshotPending = true; // この瞬間の画面をスコアカード用に保存（描画後にキャプチャ）
     popups.push({ x: p.x, y: p.y - 34, text: n + 'だん!', life: 45, color: NAVY });
     if (n % 10 === 0) { SFX.tick10(); popups.push({ x: W / 2, y: p.y - 70, text: '🎉 ' + n + 'だん!! 🎉', life: 70, color: '#e4586b' }); }
   }
@@ -848,7 +876,9 @@ function gameOver(reason) {
   BGM.setRate(1);
   updateHomeBtn();
   SFX.over();
+  if (!hasSnapshot) captureSnapshot(); // 0だん終了でもカードは作れるように
   const isRecord = game.maxCount > 0 && game.maxCount > game.best;
+  game.wasRecord = isRecord;
   BGM.stop();
   if (isRecord) {
     game.best = game.maxCount;
@@ -1649,9 +1679,116 @@ function drawHUD() {
 function loop() {
   update();
   draw();
+  if (snapshotPending) { snapshotPending = false; captureSnapshot(); }
   requestAnimationFrame(loop);
 }
 loop();
+
+/* ================= スコアカード合成 ================= */
+function makeScoreCard() {
+  const CW = 720, CH = 1280;
+  const c = document.createElement('canvas');
+  c.width = CW; c.height = CH;
+  const g = c.getContext('2d');
+  const FONT = '"Hiragino Maru Gothic ProN", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif';
+  const oText = (text, x, y, size, color, weight = 800) => {
+    g.font = `${weight} ${size}px ${FONT}`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.lineWidth = size / 4.5;
+    g.strokeStyle = '#fff';
+    g.lineJoin = 'round';
+    g.strokeText(text, x, y);
+    g.fillStyle = color;
+    g.fillText(text, x, y);
+  };
+  const sparkle = (x, y, size, color) => {
+    g.save(); g.translate(x, y);
+    g.fillStyle = color;
+    g.beginPath();
+    g.moveTo(0, -size);
+    g.quadraticCurveTo(size * .22, -size * .22, size, 0);
+    g.quadraticCurveTo(size * .22, size * .22, 0, size);
+    g.quadraticCurveTo(-size * .22, size * .22, -size, 0);
+    g.quadraticCurveTo(-size * .22, -size * .22, 0, -size);
+    g.fill(); g.restore();
+  };
+  // 背景
+  const bg = g.createLinearGradient(0, 0, 0, CH);
+  bg.addColorStop(0, '#bee3f5');
+  bg.addColorStop(1, '#fdf3e3');
+  g.fillStyle = bg;
+  g.fillRect(0, 0, CW, CH);
+  // 雲
+  g.fillStyle = 'rgba(255,255,255,.85)';
+  for (const [cx, cy, r] of [[110, 150, 40], [620, 240, 48], [80, 700, 36], [650, 850, 42]]) {
+    g.beginPath();
+    g.arc(cx, cy, r, 0, Math.PI * 2);
+    g.arc(cx + r * .9, cy + 8, r * .72, 0, Math.PI * 2);
+    g.arc(cx - r * .9, cy + 9, r * .68, 0, Math.PI * 2);
+    g.fill();
+  }
+  // 地面帯
+  g.fillStyle = '#f2e2c4';
+  g.fillRect(0, CH - 130, CW, 130);
+  g.strokeStyle = NAVY; g.lineWidth = 6;
+  g.beginPath(); g.moveTo(0, CH - 130); g.lineTo(CW, CH - 130); g.stroke();
+  // ロゴ
+  oText('GzGzのアイスつみ', CW / 2, 92, 58, NAVY);
+  g.font = `800 22px ${FONT}`;
+  g.fillStyle = NAVY; g.globalAlpha = .55;
+  g.fillText('I C E   C R E A M   S T A C K E R', CW / 2, 142);
+  g.globalAlpha = 1;
+  // スコア
+  oText(game.maxCount + 'だん', CW / 2, 250, 120, NAVY);
+  oText('つめた！', CW / 2, 340, 40, NAVY);
+  if (game.wasRecord) oText('✨ ベストこうしん! ✨', CW / 2, 408, 34, '#e4586b');
+  // ポラロイド（最高記録の瞬間）
+  const pw = 340, ph = pw * H / W; // 340x599
+  const frame = 16, capH = 54;
+  g.save();
+  g.translate(CW / 2, 460 + (ph + frame * 2 + capH) / 2);
+  g.rotate(-0.04);
+  g.shadowColor = 'rgba(35,42,92,.3)';
+  g.shadowBlur = 24;
+  g.shadowOffsetY = 10;
+  g.fillStyle = '#fff';
+  g.fillRect(-pw / 2 - frame, -(ph + frame * 2 + capH) / 2, pw + frame * 2, ph + frame * 2 + capH);
+  g.shadowColor = 'transparent';
+  g.drawImage(snapCv, -pw / 2, -(ph + frame * 2 + capH) / 2 + frame, pw, ph);
+  g.strokeStyle = 'rgba(35,42,92,.18)'; g.lineWidth = 2;
+  g.strokeRect(-pw / 2, -(ph + frame * 2 + capH) / 2 + frame, pw, ph);
+  // キャプション（日付）
+  g.font = `700 24px ${FONT}`;
+  g.fillStyle = NAVY;
+  g.textAlign = 'center';
+  g.fillText(new Date().toLocaleDateString('ja-JP'), 0, (ph + frame * 2 + capH) / 2 - capH / 2 + 4);
+  g.restore();
+  // キラキラ
+  sparkle(96, 260, 16, '#ffd76b');
+  sparkle(636, 210, 12, '#fff');
+  sparkle(650, 470, 14, '#ffd76b');
+  sparkle(70, 520, 11, '#fff');
+  sparkle(620, 1130, 12, '#ffd76b');
+  // GzGz（右下）
+  if (imgGzgz.complete) {
+    const ih = 210, iw = ih * (imgGzgz.width / imgGzgz.height || 0.57);
+    g.drawImage(imgGzgz, CW - iw - 44, CH - 130 - ih, iw, ih);
+  }
+  // 下部テキスト
+  g.textAlign = 'left';
+  g.font = `800 30px ${FONT}`;
+  g.fillStyle = NAVY;
+  g.fillText('ベスト ' + game.best + 'だん', 48, CH - 88);
+  g.font = `700 22px ${FONT}`;
+  g.globalAlpha = .75;
+  g.fillText(GAME_URL.replace('https://', ''), 48, CH - 48);
+  g.globalAlpha = .5;
+  g.font = `700 18px ${FONT}`;
+  g.fillText('© 2026 wanobo', 48, CH - 16);
+  g.globalAlpha = 1;
+  return c;
+}
 
 /* ================= 画面遷移 ================= */
 function resetGame() {
@@ -1666,6 +1803,8 @@ function resetGame() {
   game.camY = 0;
   game.zoom = 1;
   game.t = 0;
+  hasSnapshot = false;
+  snapshotPending = false;
   game.spawnTimer = 60;
   game.px = W / 2;
   game.targetX = W / 2;
@@ -1734,6 +1873,48 @@ document.getElementById('shareOther').addEventListener('click', async (e) => {
   }
 });
 document.getElementById('homeBtn').addEventListener('click', toTitle);
+
+/* スコアカード */
+let currentCard = null;
+function canShareFiles() {
+  try {
+    return !!(navigator.canShare && navigator.canShare({ files: [new File([''], 'a.png', { type: 'image/png' })] }));
+  } catch (e) { return false; }
+}
+document.getElementById('cardBtn').addEventListener('click', () => {
+  currentCard = makeScoreCard();
+  document.getElementById('cardImg').src = currentCard.toDataURL('image/png');
+  document.getElementById('cardShareBtn').classList.toggle('hidden', !canShareFiles());
+  document.getElementById('cardOv').classList.remove('hidden');
+});
+document.getElementById('cardCloseBtn').addEventListener('click', () => {
+  document.getElementById('cardOv').classList.add('hidden');
+});
+document.getElementById('cardShareBtn').addEventListener('click', () => {
+  if (!currentCard) return;
+  currentCard.toBlob(blob => {
+    if (!blob) return;
+    const file = new File([blob], 'gzgz-score.png', { type: 'image/png' });
+    navigator.share({ files: [file], text: (game.shareText || 'GzGzのアイスつみ🍨🐻') + '\n' + GAME_URL }).catch(() => {});
+  }, 'image/png');
+});
+document.getElementById('cardSaveBtn').addEventListener('click', (e) => {
+  if (!currentCard) return;
+  currentCard.toBlob(blob => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'gzgz-score.png';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    const btn = e.target;
+    btn.textContent = 'ほぞんしました！';
+    setTimeout(() => { btn.textContent = 'ほぞん'; }, 1600);
+  }, 'image/png');
+});
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape' && game.state !== 'title') toTitle();
 });

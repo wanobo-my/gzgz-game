@@ -51,6 +51,7 @@
     align-items: center;
     justify-content: center;
     gap: 10px;
+    padding-bottom: 30px; /* 下端の©表記とボタンが重ならないように */
     text-align: center;
     color: var(--navy);
     background: rgba(253, 243, 227, 0.62);
@@ -59,14 +60,14 @@
   }
   .hidden { display: none !important; }
   .logo {
-    font-size: 42px;
+    font-size: 37px;
     font-weight: 800;
     letter-spacing: 2px;
     color: var(--navy);
     text-shadow: 3px 3px 0 #fff;
     line-height: 1.2;
   }
-  .logo small { display: block; font-size: 15px; letter-spacing: 4px; }
+  .logo small { display: block; font-size: 13px; letter-spacing: 4px; }
   .charimg { width: 96px; image-rendering: auto; filter: drop-shadow(0 4px 0 rgba(35,42,92,.15)); }
   .howto {
     font-size: 12px;
@@ -78,7 +79,8 @@
     padding: 9px 16px 10px;
     box-shadow: 0 4px 0 rgba(35,42,92,.2);
   }
-  .howto .ht-sub { font-size: 10px; opacity: .6; font-weight: 400; }
+  .howto .ht-line { margin: 5px 0; }
+  .howto .ht-sub { font-size: 10px; opacity: .6; font-weight: 400; margin: 2px 0 1px; }
   .howto .badge {
     display: inline-block;
     font-size: 10.5px;
@@ -86,7 +88,7 @@
     color: #fff;
     border-radius: 999px;
     padding: 1px 12px 2px;
-    margin: 6px 0 0;
+    margin: 9px 0 1px;
     border: 2px solid var(--navy);
     box-shadow: 0 2px 0 rgba(35,42,92,.25);
     letter-spacing: 1px;
@@ -978,7 +980,9 @@ function update() {
         landed = true;
       }
       if (!landed) {
-        for (const t of stackedList()) {
+        // フィーバー中はてっぺん限定（側面や中段に吸着して塔が歪むのを防ぐ。乗れなければ落下＝無罰）
+        const candidates = game.fever > 0 ? (topScoop() ? [topScoop()] : []) : stackedList();
+        for (const t of candidates) {
           const tp = t.body.position;
           const tTop = tp.y - SCOOP_H / 2;
           if (Math.abs(sx - tp.x) < SCOOP_W - 8 && sBottom > tTop - 8 && sBottom < tTop + 14) {

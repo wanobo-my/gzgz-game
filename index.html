@@ -544,7 +544,7 @@ function addGlue(scoopBody, support) {
   const c1 = makeGlueConstraint(scoopBody, support, -10);
   const c2 = makeGlueConstraint(scoopBody, support, 10);
   Composite.add(engine.world, [c1, c2]);
-  glues.push({ c1, c2, a: scoopBody, b: support });
+  glues.push({ c1, c2, a: scoopBody, b: support, born: game.t });
 }
 function dropGlue(g) {
   Composite.remove(engine.world, g.c1);
@@ -567,10 +567,11 @@ function refreshGlues() {
 }
 function updateGlues() {
   // 高い塔ほど全体的に強く、かつ根本ほど強い（振り回すと「てっぺんから」剥がれる）
-  const base = GLUE_BREAK_DIST + 25 * assistK();
+  const base = GLUE_BREAK_DIST + 18 * assistK();
   for (const g of glues) {
+    if (game.t - g.born < 45) continue; // できたての接着は溶着中＝切れない（着地直後の理不尽剥がれ防止）
     const depth = depthMap.get(g.a) ?? 1;
-    const limit = base * (0.65 + 0.35 * depth);
+    const limit = base * (0.7 + 0.3 * depth);
     for (const cst of [g.c1, g.c2]) {
       const wa = rotatedPoint(g.a, cst.pointA);
       const wb = rotatedPoint(g.b, cst.pointB);
@@ -854,6 +855,21 @@ function crushAt(contactScoop, ball) {
     burst(p.x, p.y, s.flavor.base, 12, { flat: true });
     removeScoop(s);
   }
+  // 切断点より上のセクションは接着がバラけて崩れ落ちる（アイスなので耐えられない）
+  if (near.length) {
+    const cutY = Math.max(...near.map(o => o.s.body.position.y)); // 潰れた中で最も下
+    const dir = Math.sign(ball.body.velocity.x) || (Math.random() < .5 ? -1 : 1);
+    for (const s of stackedList()) {
+      if (s.body.position.y < cutY) {
+        removeGluesFor(s.body);
+        Body.setVelocity(s.body, {
+          x: s.body.velocity.x + dir * rnd(0.5, 2.5),
+          y: s.body.velocity.y - rnd(0, 1.5),
+        });
+        Body.setAngularVelocity(s.body, rnd(-0.08, 0.08));
+      }
+    }
+  }
   game.shake = 14;
   game.faceTimer = 60;
   SFX.crush();
@@ -1008,8 +1024,13 @@ function update() {
     pending = pending.filter(p => p.t > 0);
   }
 
-  // フィーバー中の磁石キャッチ: 落下アイスがスタック上部に吸い付く
-  if (game.state === 'play' && game.fever > 0) {
+  // 磁石キャッチ: 落下アイスがスタック上部に吸い付く
+  // （フィーバー中は強力。通常時も弱く効き、高い塔ほど少し強くなる＝揺れる頂上でも取れる）
+  if (game.state === 'play') {
+    const inFever = game.fever > 0;
+    const pull = inFever ? 0.18 : 0.04 + 0.06 * assistK();
+    const rangeX = inFever ? 95 : 60;
+    const rangeY = inFever ? 150 : 130;
     const top = topScoop();
     const tx = top ? top.body.position.x : game.px;
     const ty = top ? top.body.position.y : CONE_Y;
@@ -1017,8 +1038,8 @@ function update() {
       if (s.state !== 'falling') continue;
       const sp = s.body.position;
       const dxm = tx - sp.x, dym = ty - sp.y;
-      if (dym > 0 && dym < 150 && Math.abs(dxm) < 95) {
-        Body.setPosition(s.body, { x: sp.x + dxm * 0.18, y: sp.y });
+      if (dym > 0 && dym < rangeY && Math.abs(dxm) < rangeX) {
+        Body.setPosition(s.body, { x: sp.x + dxm * pull, y: sp.y });
         Body.setVelocity(s.body, { x: s.body.velocity.x * 0.6, y: s.body.velocity.y });
       }
     }
@@ -1036,7 +1057,7 @@ function update() {
       if (Math.abs(sx - game.px) < (CONE_W + SCOOP_W) / 2 - 10 && sBottom > coneTop - 8 && sBottom < coneTop + 12 && stackCount() === 0) {
         // フィーバー中は自動で真ん中に整列（明けた瞬間に崩れる理不尽を防ぐ）
         Body.setPosition(s.body, { x: game.fever > 0 ? game.px : sx, y: coneTop - SCOOP_H / 2 + 1 });
-        Body.setVelocity(s.body, { x: 0, y: 0 });
+        Body.setVelocity(s.body, { x: game.vx, y: 0 }); // 動いている土台に速度を合わせる
         Body.setAngularVelocity(s.body, 0);
         land(s, cone);
         landed = true;
@@ -1049,7 +1070,7 @@ function update() {
           const tTop = tp.y - SCOOP_H / 2;
           if (Math.abs(sx - tp.x) < SCOOP_W - 8 && sBottom > tTop - 8 && sBottom < tTop + 14) {
             Body.setPosition(s.body, { x: game.fever > 0 ? tp.x : sx, y: tTop - SCOOP_H / 2 + 1 });
-            Body.setVelocity(s.body, { x: 0, y: 0 });
+            Body.setVelocity(s.body, { x: t.body.velocity.x, y: 0 }); // 揺れている土台に速度を合わせる
             Body.setAngularVelocity(s.body, 0);
             land(s, t.body);
             break;
@@ -1059,7 +1080,7 @@ function update() {
     }
   }
 
-  // 高さ連動アシスト: 深さマップ更新・減衰強化・接着硬化・直立復元ナッジ
+  // 高さ連動アシスト: 深さマップ更新・減衰・接着硬化・バネ-ダンパー復元
   {
     const ak = assistK();
     const st = stackedList().sort((a, b) => b.body.position.y - a.body.position.y); // 下から
@@ -1067,25 +1088,26 @@ function update() {
     const n = st.length;
     st.forEach((s, i) => {
       depthMap.set(s.body, n > 1 ? 1 - i / (n - 1) : 1);
-      s.body.frictionAir = 0.012 + 0.035 * ak;
+      s.body.frictionAir = 0.012 + 0.01 * ak + 0.025 * ak * ak;
     });
-    const stiff = 0.5 + 0.4 * ak;
+    const stiff = 0.5 + 0.25 * ak;
     for (const g of glues) {
       g.c1.stiffness = stiff;
       g.c2.stiffness = stiff;
     }
-    // 理想の縦列位置（コーン真上の一直線）へ毎フレーム引き戻すブレンド。
-    // 高いほど強く効き、揺れは残るが発散しない＝ソフトクリームが固まっていく感覚
+    // バネ-ダンパー: 各アイスが「1つ下」を追いかける速度補正。
+    // 慣性が保存されるので「しなって、揺れ戻って、収まる」自然な揺れが残り、発散だけを防ぐ
     if (ak > 0 && game.fever <= 0) {
-      const blend = 0.05 * ak + 0.25 * ak * ak;
-      const baseY = CONE_Y - CONE_H / 2 - SCOOP_H / 2 + 1;
-      st.forEach((s, i) => {
-        const ix = game.px, iy = baseY - i * (SCOOP_H - 1);
-        const p = s.body.position;
-        Body.setPosition(s.body, { x: p.x + (ix - p.x) * blend, y: p.y + (iy - p.y) * blend });
-        Body.setAngle(s.body, s.body.angle * (1 - blend));
-        Body.setVelocity(s.body, { x: s.body.velocity.x * (1 - blend * 0.8), y: s.body.velocity.y * (1 - blend * 0.8) });
-      });
+      // 二次カーブ: 中層(ak~0.4)は揺れ感を残し、高層(ak~1)でしっかり支える
+      const K = 0.010 + 0.02 * ak + 0.13 * ak * ak;  // バネ（揺れ戻りの速さ）
+      const C = 0.05 + 0.06 * ak + 0.60 * ak * ak;   // ダンパー（収まりの速さ。高層は共振を殺す）
+      for (const g of glues) {
+        if (g.gone) continue;
+        const relX = g.b.position.x - g.a.position.x;
+        const relV = (g.b === cone ? game.vx : g.b.velocity.x) - g.a.velocity.x;
+        const acc = relX * K + relV * C;
+        Body.setVelocity(g.a, { x: g.a.velocity.x + acc, y: g.a.velocity.y });
+      }
     }
   }
 
